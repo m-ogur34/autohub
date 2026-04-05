@@ -178,6 +178,13 @@ export class AuthService {
   }
 
   /**
+   * Çalışan yetkisi var mı? (Admin, Manager veya Employee)
+   */
+  isEmployee(): boolean {
+    return this.hasRole('ADMIN') || this.hasRole('MANAGER') || this.hasRole('EMPLOYEE');
+  }
+
+  /**
    * Access token döndürür
    */
   getAccessToken(): string | null {
