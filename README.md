@@ -409,4 +409,118 @@ Bu proje MIT lisansı altında lisanslanmıştır.
 
 ---
 
-*AutoHub - Araç yönetimini kolaylaştırıyoruz* 🚗
+## Öğrenilen Kavramlar
+
+### Spring Boot Katmanlı Mimari
+```
+Controller  → HTTP mapping, input validation, response format
+Service     → İş mantığı, @Transactional sınırı
+Repository  → Spring Data JPA, JPQL, Specification
+Entity      → JPA ORM, ilişkiler, BaseEntity (Auditing)
+
+Bağımlılık yönü (tek yön):
+Controller → Service → Repository → DB
+Hiçbir zaman Repository → Service çağırmamalı
+```
+
+### JPA İlişkileri
+```java
+// OneToMany: Araç → Kiralama geçmişi
+@OneToMany(mappedBy = "vehicle", fetch = FetchType.LAZY,
+           cascade = CascadeType.ALL, orphanRemoval = true)
+private List<Transaction> transactions = new ArrayList<>();
+
+// ManyToOne: Kiralama → Araç (FK: transactions.vehicle_id)
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "vehicle_id")
+private Vehicle vehicle;
+
+// FetchType.LAZY: transaction yüklenince araç yüklenmez
+// transaction.getVehicle() çağrılınca ayrı SQL atılır
+// N+1 sorunu: 100 transaction → 101 SQL (her biri için getVehicle())
+// Çözüm: @EntityGraph veya JOIN FETCH sorgusu
+```
+
+### Spring Security (JWT)
+```
+İstek akışı:
+  HTTP Request
+      ↓
+  JwtAuthenticationFilter
+      ├── Authorization: Bearer <token> header var mı?
+      ├── JWT imzası geçerli mi? (HMAC-SHA256)
+      ├── Token süresi dolmadı mı?
+      ├── UserDetailsService.loadUserByUsername(email)
+      └── SecurityContextHolder'a Authentication koy
+      ↓
+  Controller (@PreAuthorize / hasRole kontrolleri)
+
+Stateless Session:
+  SessionCreationPolicy.STATELESS → sunucuda session tutulmaz
+  Her istek kendi JWT'sini getirir → yatay ölçekleme kolay
+```
+
+### Redis Kullanım Alanları
+```
+Cache (@Cacheable):
+  "vehicles"   → tüm araç listesi (TTL: 5dk)
+  "vehicle"    → tek araç detayı (TTL: 10dk)
+  @CacheEvict → araç güncellenince ilgili cache temizlenir
+
+Session:
+  Kullanıcı oturum bilgisi → JWT blacklist (logout sonrası)
+
+Rate Limiter:
+  "rate-limit:{ip}" → Redis INCR ile saniye/dakika bazlı limit
+```
+
+### Kafka Event-Driven
+```
+Producer (araç kiralama tamamlandı):
+  kafkaTemplate.send("vehicle-events", RentalCompletedEvent)
+
+Consumer (notification-service):
+  @KafkaListener(topics = "vehicle-events", groupId = "notification-group")
+  public void handleRentalCompleted(RentalCompletedEvent event) {
+      // email/SMS gönder
+  }
+
+Avantaj: Servisler birbirinden bağımsız, async işleme
+```
+
+### Elasticsearch Full-Text Search
+```
+Araç arama:
+  - Marka, model, açıklama alanlarında tam metin arama
+  - Multi-match query: birden fazla alana aynı anda ara
+  - Türkçe analyzer: "otomobil" → "otomobil", "araç" stem'i
+  - Aggregation: marka bazında araç sayısı, fiyat istatistikleri
+```
+
+---
+
+## Mülakat Soruları
+
+**Q: @Cacheable, @CachePut, @CacheEvict farkları nedir?**
+A: `@Cacheable`: Metod sonucunu cache'e yazar; aynı key ile tekrar çağrılınca metod çalıştırılmaz, cache'den döner. `@CachePut`: Her zaman metodu çalıştırır ve sonucu cache'e yazar (cache güncelleme — update sonrası). `@CacheEvict`: Cache'i temizler (entity silindiğinde veya güncellendiğinde). `allEntries=true` ile ilgili tüm cache'i temizler. Birlikte örnek: araç güncelleme → `@CachePut("vehicle")` tek araç günceller, `@CacheEvict("vehicles")` liste cache'ini temizler.
+
+**Q: N+1 sorunu nedir ve nasıl çözülür?**
+A: N+1: Ana listeyi getirmek için 1 SQL, her eleman için ilişkili nesneyi getirmek için N SQL. Örnek: 100 araç listesi + her aracın markası = 101 SQL. Çözüm 1: `@EntityGraph` — ilgili entity JOIN ile tek sorguda gelir. Çözüm 2: JPQL `JOIN FETCH` — `SELECT v FROM Vehicle v JOIN FETCH v.brand`. Çözüm 3: `@BatchSize` — N+1 yerine N/batchSize SQL. Spring Data JPA'da test etmek için `spring.jpa.show-sql=true` ile SQL sayısı sayılabilir.
+
+**Q: JPA Lazy Loading nasıl çalışır? Transaction dışında sorun olur mu?**
+A: LAZY: entity yüklendiğinde ilişkili nesne Hibernate proxy'si olarak atanır. Gerçek veriye erişilince (proxy.getId() hariç) SQL atılır. Problem: Transaction kapandıktan sonra erişilirse `LazyInitializationException`. Çözüm: `@Transactional(readOnly=true)` ile servis metodunu transaction'lı yap, DTO'ya lazy field'ı kopyala, sonra transaction dışına çık. Alternatif: OpenEntityManagerInView (antipattern — Controller'da transaction — tercih edilmez).
+
+**Q: Spring Security filter chain sırası neden önemli?**
+A: JwtAuthenticationFilter'ı `UsernamePasswordAuthenticationFilter`'dan önce ekleriz. Sıra yanlış olursa JWT kontrolü yapılmadan form login denenebilir. `.addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)` doğru sıra. SecurityFilterChain'de `authorizeHttpRequests` sıraması da önemli: daha spesifik path'ler önce, `anyRequest()` en sona.
+
+**Q: Soft delete nedir? Neden tercih edilir?**
+A: `is_deleted = true` ile kaydı veritabanından silmek yerine pasif işaretleme. Avantajlar: silinen veriler geri alınabilir (audit trail), raporlama için geçmiş veriler erişilebilir, referential integrity sorunları önlenir (FK constraints bozulmaz). Dezavantaj: tablo büyür, tüm sorguları `WHERE is_deleted = false` ile filtreleme gerekir. Spring Data ile: `@Where(clause = "is_deleted = false")` annotation ile otomatik filtreleme.
+
+**Q: Kafka Producer ve Consumer hangi garantileri verir?**
+A: Producer: `acks=all` → tüm replica'lar teyit edene kadar bekler (en güvenli). `acks=1` → sadece leader onaylar. `acks=0` → onay bekleme (en hızlı, kayıp riski). Consumer: `auto-commit=false` + manuel ack → mesaj işlendikten sonra commit, hata durumunda yeniden işleme. `enable.auto.commit=true` → her `poll()` sonrası commit (kayıp riski). Exactly-once: Kafka Transactions API + idempotent consumer gerektirir.
+
+**Q: @EnableAsync ile @Async nasıl çalışır?**
+A: `@EnableAsync` Spring'e async method execution etkinleştir der. `@Async` ile işaretlenen metod çağrıldığında, aynı thread'de çalışmaz — Spring thread pool'dan bir thread alır ve metodu arka planda çalıştırır. Çağıran thread anında döner (non-blocking). Return type `void` veya `CompletableFuture<T>` olabilir. Dikkat: `@Async` kendi class'ından çağrılırsa çalışmaz (self-invocation) — Spring AOP proxy üzerinden geçmesi gerekir.
+
+**Q: Specification Pattern ne zaman kullanılır?**
+A: Dinamik filtreleme senaryolarında: "marka=BMW, yıl=2020-2023, fiyat<500TL/gün, aktif araçlar" gibi kombinasyonlar. Her filtre bir Specification. `Specification.where(byBrand).and(byYear).and(byPrice)` ile birleştirilir. JpaSpecificationExecutor.findAll(spec, pageable) çağrılır. SQL dinamik olarak üretilir. Alternatif: QueryDSL (tip güvenli, daha güçlü) veya JPQL ile elle yazma (esnek değil).
